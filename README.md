@@ -36,7 +36,7 @@ Apps managed: deckcraft, designcraft, effectcraft, filmcraft, gridcraft, lightcr
 - Python 3.8+ (stdlib only, no pip installs).
 - Windows (the apps ship Windows portable zips; the installer also runs on other OSes but there is nothing to launch there).
 - Network access to GitHub releases (and optionally VirusTotal).
-- Optional: `VT_API_KEY` environment variable for automated VirusTotal scans.
+- `VT_API_KEY` environment variable for the obligatory VirusTotal scan (get a free key at https://www.virustotal.com/gui/my-apikey). Use `--skip-vt` to bypass (not recommended).
 
 ## 🛠️ Usage
 

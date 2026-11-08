@@ -485,7 +485,7 @@ def main():
     parser.add_argument("apps", nargs="*", help="subset of apps (default: all)")
     parser.add_argument("--root", type=Path, default=None, help="appbox root (default: script dir)")
     parser.add_argument("--yes", "-y", action="store_true", help="skip confirmation prompts")
-    parser.add_argument("--skip-vt", action="store_true", help="skip VirusTotal check")
+    parser.add_argument("--skip-vt", action="store_true", help="skip the obligatory VirusTotal check (not recommended)")
     parser.add_argument("--remove", action="store_true", help="with 'assoc': unregister associations instead of registering")
     args = parser.parse_args()
 
@@ -511,15 +511,22 @@ def main():
         cmd_run(args.apps[0], root)
         return
 
-    # VirusTotal check is optional: ask at the start for install/update.
-    if not args.skip_vt:
+    # VirusTotal check is obligatory. Ensure an API key is available.
+    if not args.skip_vt and not vt_key:
         if args.yes:
-            if not vt_key:
-                args.skip_vt = True
+            print("VirusTotal check is obligatory but VT_API_KEY is not set.")
+            print("Get a free API key at https://www.virustotal.com/gui/my-apikey and set VT_API_KEY, or use --skip-vt to bypass.")
+            sys.exit(1)
         else:
-            if not confirm("Run optional VirusTotal scan? (requires VT_API_KEY for automatic results)", False):
-                args.skip_vt = True
-
+            print("VirusTotal API key not found (VT_API_KEY).")
+            print("Get a free key at https://www.virustotal.com/gui/my-apikey")
+            entered = input("Paste your VirusTotal API key (or leave blank to abort): ").strip()
+            if entered:
+                vt_key = entered
+                os.environ["VT_API_KEY"] = entered
+            else:
+                print("Aborted. Set VT_API_KEY or use --skip-vt to bypass.")
+                sys.exit(1)
     apps = args.apps if args.apps else APPS
     apps = [a for a in apps if a in APPS]
     if not apps:
