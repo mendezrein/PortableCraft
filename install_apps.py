@@ -28,6 +28,12 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
+try:
+    import winreg
+    import ctypes
+    _WINREG_OK = True
+except ImportError:
+    _WINREG_OK = False
 APPS = ["deckcraft", "designcraft", "effectcraft", "filmcraft", "gridcraft",
         "lightcraft", "pdfcraft", "photocraft", "vectorcraft", "wordcraft"]
 PASCAL = {
@@ -42,6 +48,21 @@ PASCAL = {
     "vectorcraft": "VectorCraft",
     "wordcraft": "WordCraft",
 }
+
+# File associations to register (per-user, HKCU). PdfCraft is intentionally
+# omitted: the user chose not to override the default PDF handler.
+FILE_ASSOC = {
+    "wordcraft": [".docx", ".doc", ".odt", ".rtf"],
+    "photocraft": [".psd", ".psb"],
+    "gridcraft": [".xlsx", ".xls", ".csv", ".ods"],
+    "deckcraft": [".pptx", ".ppt", ".odp"],
+    "designcraft": [".designcraft", ".design"],
+    "effectcraft": [".effectcraft", ".efc"],
+    "filmcraft": [".filmcraft", ".fc"],
+    "lightcraft": [".lightcraft", ".lrc"],
+    "vectorcraft": [".svg", ".ai", ".eps", ".vectorcraft"],
+}
+
 GITHUB_ORG = "storytold"
 ARCH = "x64"
 
@@ -258,6 +279,169 @@ def cmd_list(root: Path):
             print(f"{app:10s} not installed")
 
 
+def _assoc_backup_key(ext: str) -> str:
+    return "Software\\PortableCraft\\Backup\\" + ext.lstrip(".").replace(".", "_")
+
+
+def _backup_previous(ext: str, prev: str | None):
+    if not _WINREG_OK:
+        return
+    if not prev:
+        return
+    try:
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, _assoc_backup_key(ext)) as k:
+            winreg.SetValueEx(k, "ProgID", 0, winreg.REG_SZ, prev)
+    except Exception:
+        pass
+
+
+def _restore_previous(ext: str) -> str | None:
+    if not _WINREG_OK:
+        return None
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _assoc_backup_key(ext)) as k:
+            return winreg.QueryValueEx(k, "ProgID")[0]
+    except FileNotFoundError:
+        return None
+    except Exception:
+        return None
+
+
+def register_assoc(app: str, root: Path) -> bool:
+    if not _WINREG_OK:
+        print(f"[{app}] winreg unavailable (not Windows?)")
+        return False
+    exe = root / app / f"{app}.exe"
+    if not exe.is_file():
+        print(f"[{app}] not installed, skipping associations")
+        return False
+    progid = f"PortableCraft.{PASCAL[app]}"
+    # Create ProgID
+    try:
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, f"Software\\Classes\\{progid}") as k:
+            winreg.SetValueEx(k, "", 0, winreg.REG_SZ, f"{PASCAL[app]} Document")
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, f"Software\\Classes\\{progid}\\DefaultIcon") as k:
+            winreg.SetValueEx(k, "", 0, winreg.REG_SZ, f'"{exe}",0')
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, f"Software\\Classes\\{progid}\\shell\\open\\command") as k:
+            winreg.SetValueEx(k, "", 0, winreg.REG_SZ, f'"{exe}" "%1"')
+    except Exception as e:
+        print(f"[{app}] failed to create ProgID: {e}")
+        return False
+
+    for ext in FILE_ASSOC.get(app, []):
+        # back up previous default handler
+        prev = None
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, f"Software\\Classes\\{ext}") as k:
+                prev = winreg.QueryValueEx(k, "")[0]
+        except FileNotFoundError:
+            prev = None
+        except Exception:
+            prev = None
+        if prev and prev != progid:
+            _backup_previous(ext, prev)
+        try:
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, f"Software\\Classes\\{ext}") as k:
+                winreg.SetValueEx(k, "", 0, winreg.REG_SZ, progid)
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, f"Software\\Classes\\{ext}\\OpenWithProgids") as k:
+                winreg.SetValueEx(k, progid, 0, winreg.REG_NONE, b"")
+        except Exception as e:
+            print(f"[{app}] failed to register {ext}: {e}")
+            continue
+        print(f"[{app}] associated {ext} -> {progid}")
+    return True
+
+
+def unregister_assoc(app: str, root: Path) -> bool:
+    if not _WINREG_OK:
+        return False
+    progid = f"PortableCraft.{PASCAL[app]}"
+    for ext in FILE_ASSOC.get(app, []):
+        try:
+            restored = _restore_previous(ext)
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, f"Software\\Classes\\{ext}", 0, winreg.KEY_SET_VALUE) as k:
+                if restored:
+                    winreg.SetValueEx(k, "", 0, winreg.REG_SZ, restored)
+                else:
+                    try:
+                        winreg.DeleteValue(k, "")
+                    except FileNotFoundError:
+                        pass
+            # remove from OpenWithProgids
+            try:
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, f"Software\\Classes\\{ext}\\OpenWithProgids", 0, winreg.KEY_SET_VALUE) as k:
+                    try:
+                        winreg.DeleteValue(k, progid)
+                    except FileNotFoundError:
+                        pass
+            except FileNotFoundError:
+                pass
+            print(f"[{app}] unregistered {ext}")
+        except Exception as e:
+            print(f"[{app}] failed to unregister {ext}: {e}")
+    # remove ProgID key tree
+    try:
+        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, f"Software\\Classes\\{progid}\\shell\\open\\command")
+        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, f"Software\\Classes\\{progid}\\shell\\open")
+        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, f"Software\\Classes\\{progid}\\shell")
+        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, f"Software\\Classes\\{progid}\\DefaultIcon")
+        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, f"Software\\Classes\\{progid}")
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"[{app}] ProgID cleanup warning: {e}")
+    return True
+
+
+def _notify_shell():
+    if not _WINREG_OK:
+        return
+    try:
+        ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x0000, None, None)
+    except Exception:
+        pass
+
+
+def cmd_assoc(root: Path, apps: list, remove: bool = False, yes: bool = False):
+    if not _WINREG_OK:
+        print("file associations require Windows (winreg unavailable)")
+        return
+    if not apps:
+        apps = list(FILE_ASSOC.keys())
+    apps = [a for a in apps if a in FILE_ASSOC]
+    if not apps:
+        print("no apps with file associations specified")
+        return
+
+    # only installed apps
+    targets = []
+    for app in apps:
+        if (root / app / f"{app}.exe").is_file():
+            targets.append(app)
+        else:
+            print(f"[{app}] not installed, skipping")
+    if not targets:
+        print("no installed apps to associate")
+        return
+
+    action = "unregister" if remove else "register"
+    print(f"Will {action} file associations for: {', '.join(targets)}")
+    for app in targets:
+        print(f"  {PASCAL[app]}: {', '.join(FILE_ASSOC[app])}")
+    if not remove:
+        print("This changes per-user (HKCU) default open handlers. Existing handlers are backed up.")
+    if not confirm("Continue?", yes):
+        print("aborted")
+        return
+    for app in targets:
+        if remove:
+            unregister_assoc(app, root)
+        else:
+            register_assoc(app, root)
+    _notify_shell()
+    print("done (you may need to reopen Explorer windows)")
+
+
 def start_menu_dir() -> Path:
     base = Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "AppBox"
     base.mkdir(parents=True, exist_ok=True)
@@ -295,11 +479,12 @@ def cmd_run(app: str, root: Path):
 
 def main():
     parser = argparse.ArgumentParser(description="Install/update portable Crafting Apps")
-    parser.add_argument("command", nargs="?", default="install", choices=["install", "update", "run", "list", "shortcuts"])
+    parser.add_argument("command", nargs="?", default="install", choices=["install", "update", "run", "list", "shortcuts", "assoc"])
     parser.add_argument("apps", nargs="*", help="subset of apps (default: all)")
     parser.add_argument("--root", type=Path, default=None, help="appbox root (default: script dir)")
     parser.add_argument("--yes", "-y", action="store_true", help="skip confirmation prompts")
     parser.add_argument("--skip-vt", action="store_true", help="skip VirusTotal check")
+    parser.add_argument("--remove", action="store_true", help="with 'assoc': unregister associations instead of registering")
     args = parser.parse_args()
 
     root = args.root if args.root else root_dir()
@@ -313,6 +498,9 @@ def main():
         for app in (args.apps if args.apps else APPS):
             if app in APPS:
                 create_shortcut(app, root)
+        return
+    if args.command == "assoc":
+        cmd_assoc(root, args.apps if args.apps else list(FILE_ASSOC.keys()), args.remove, args.yes)
         return
     if args.command == "run":
         if not args.apps:

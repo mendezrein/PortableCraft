@@ -47,6 +47,8 @@ python install_apps.py install wordcraft pdfcraft   # subset
 python install_apps.py run <app>      # launch an app
 python install_apps.py list            # show installed versions
 python install_apps.py shortcuts       # create/update Start Menu shortcuts
+python install_apps.py assoc           # register per-user file associations
+python install_apps.py assoc --remove  # unregister (restores previous handlers)
 ```
 
 Flags: `--yes` (skip prompts), `--skip-vt`, `--root <dir>`.
@@ -56,6 +58,14 @@ Flags: `--yes` (skip prompts), `--skip-vt`, `--root <dir>`.
 - `photocraft`, `pdfcraft`, `designcraft`, `effectcraft`, `filmcraft`, `vectorcraft` ship `portable.txt`: settings/logs/recovery stay in an `<App>Data` folder (or `data` for filmcraft) beside the exe. Move the whole folder to carry them. Delete `portable.txt` to use `%APPDATA%`.
 - `lightcraft` supports portable mode optionally via `portable.txt` or `LightCraft.portable`.
 - `deckcraft`, `gridcraft`, `wordcraft` do NOT support `portable.txt`; their settings live in `%APPDATA%\DeckCraft` / `GridCraft` / `WordCraft`.
+
+## File associations
+
+`python install_apps.py assoc` registers per-user (HKCU) default handlers for:
+wordcraft (.docx/.doc/.odt/.rtf), photocraft (.psd/.psb), gridcraft (.xlsx/.xls/.csv/.ods),
+deckcraft (.pptx/.ppt/.odp), designcraft, effectcraft, filmcraft, lightcraft, vectorcraft.
+Existing handlers are backed up in `HKCU\\Software\\PortableCraft\\Backup` and restored with `--remove`.
+(pdfcraft is intentionally not associated.)
 
 ## Travel / quick setup
 

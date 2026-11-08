@@ -32,6 +32,9 @@ Commands:
 - `python install_apps.py run <app>` — launch an app
 - `python install_apps.py list` — show installed versions
 - `python install_apps.py shortcuts` — create/update Windows Start Menu shortcuts (AppBox folder)
+- `python install_apps.py assoc` — register per-user (HKCU) file associations for the configured extensions
+- `python install_apps.py assoc <apps>` — subset of apps
+- `python install_apps.py assoc --remove` — unregister associations (restores previous handlers)
 - Flags: `--yes` (skip prompts), `--skip-vt`, `--root <dir>`
 
 ## Installed versions
@@ -48,6 +51,24 @@ Commands:
 | photocraft | photocraft.exe | photocraft-cli.exe | 0.21.0 |
 | vectorcraft | vectorcraft.exe | vectorcraft-cli.exe | 0.22.0 |
 | wordcraft | wordcraft.exe | wordcraft-cli.exe | 0.16.0 |
+
+## File associations
+
+Registered per-user (HKCU) by `install_apps.py assoc` (backed up in `HKCU\\Software\\PortableCraft\\Backup`):
+
+| App | Extensions |
+|---|---|
+| wordcraft | .docx, .doc, .odt, .rtf |
+| photocraft | .psd, .psb |
+| gridcraft | .xlsx, .xls, .csv, .ods |
+| deckcraft | .pptx, .ppt, .odp |
+| designcraft | .designcraft, .design |
+| effectcraft | .effectcraft, .efc |
+| filmcraft | .filmcraft, .fc |
+| lightcraft | .lightcraft, .lrc |
+| vectorcraft | .svg, .ai, .eps, .vectorcraft |
+
+(pdfcraft intentionally not associated.)
 
 ## Logs and data locations
 
