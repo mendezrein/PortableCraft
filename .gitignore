@@ -1,0 +1,26 @@
+# installed app folders (populated by install_apps.py)
+deckcraft/
+designcraft/
+effectcraft/
+filmcraft/
+gridcraft/
+lightcraft/
+pdfcraft/
+photocraft/
+vectorcraft/
+wordcraft/
+# portable app binaries and installers
+*.exe
+*.zip
+*.msi
+*.AppImage
+*.deb
+*.rpm
+*.flatpak
+# portable-mode settings / logs / recovery
+*Data/
+*.log
+# OCR models (large)
+models/
+Recovery/
+EOF

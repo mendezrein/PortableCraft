@@ -1,0 +1,345 @@
+#!/usr/bin/env python3
+"""Install or update the portable Crafting Apps in this folder.
+
+Downloads the latest portable Windows builds from github.com/storytold/<app>,
+verifies SHA-256 against the release's SHA256SUMS.txt, optionally checks
+VirusTotal, and extracts into C:\\appbox\\<app>\\ (or --root).
+
+Usage:
+    python install_apps.py                # install/update all apps (asks first)
+    python install_apps.py install        # same
+    python install_apps.py update         # update only already-installed apps
+    python install_apps.py install wordcraft pdfcraft
+    python install_apps.py run wordcraft  # launch an app
+    python install_apps.py list          # show installed versions
+    python install_apps.py --yes         # skip the confirmation prompt
+    python install_apps.py --skip-vt     # skip VirusTotal check
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import urllib.request
+import zipfile
+from pathlib import Path
+
+APPS = ["deckcraft", "designcraft", "effectcraft", "filmcraft", "gridcraft",
+        "lightcraft", "pdfcraft", "photocraft", "vectorcraft", "wordcraft"]
+PASCAL = {
+    "deckcraft": "DeckCraft",
+    "designcraft": "DesignCraft",
+    "effectcraft": "EffectCraft",
+    "filmcraft": "FilmCraft",
+    "gridcraft": "GridCraft",
+    "lightcraft": "LightCraft",
+    "pdfcraft": "PdfCraft",
+    "photocraft": "PhotoCraft",
+    "vectorcraft": "VectorCraft",
+    "wordcraft": "WordCraft",
+}
+GITHUB_ORG = "storytold"
+ARCH = "x64"
+
+
+def root_dir() -> Path:
+    # Work wherever this script (and the git checkout) lives.
+    return Path(__file__).resolve().parent
+
+
+def http_get(url: str) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": "appbox-installer/1"})
+    with urllib.request.urlopen(req, timeout=120) as r:
+        return r.read()
+
+
+def latest_release(app: str):
+    url = f"https://api.github.com/repos/{GITHUB_ORG}/{app}/releases/latest"
+    data = json.loads(http_get(url))
+    assets = {a["name"]: a["browser_download_url"] for a in data.get("assets", [])}
+    return data.get("tag_name", ""), assets
+
+
+def find_zip_asset(assets, app, arch=ARCH):
+    # <app>-<ver>-windows-<arch>-portable.zip
+    for name in assets:
+        if name.endswith("-portable.zip") and f"-windows-{arch}-" in name and name.startswith(app + "-"):
+            return name
+    return None
+
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest().upper()
+
+
+def parse_sha256sums(text: str):
+    out = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) >= 2:
+            out[parts[-1].lstrip("*")] = parts[0].upper()
+    return out
+
+
+def vt_check(file_hash: str, api_key: str | None):
+    """Return True if clean, False if malicious, None if unknown/skipped."""
+    if not api_key:
+        return None
+    try:
+        req = urllib.request.Request(
+            f"https://www.virustotal.com/api/v3/files/{file_hash}",
+            headers={"x-apikey": api_key},
+        )
+        with urllib.request.urlopen(req, timeout=60) as r:
+            data = json.loads(r.read())
+        stats = data["data"]["attributes"]["last_analysis_stats"]
+        if stats.get("malicious", 0) > 0 or stats.get("suspicious", 0) > 0:
+            return False
+        if stats.get("harmless", 0) + stats.get("undetected", 0) > 0:
+            return True
+        return None
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None  # not yet scanned
+        raise
+
+
+def confirm(prompt: str, auto_yes: bool) -> bool:
+    if auto_yes:
+        return True
+    ans = input(f"{prompt} [y/N]: ").strip().lower()
+    return ans in ("y", "yes")
+
+
+def is_installed(app: str, root: Path) -> bool:
+    return (root / app / f"{app}.exe").is_file()
+
+
+def backup_portable_state(target: Path, backup: Path):
+    backup.mkdir(parents=True, exist_ok=True)
+    data_dir = target / f"{PASCAL[target.name if target.name in PASCAL else '']}Data".replace("DataData", "Data")
+    # target.name is lowercase app; build data dir name from PASCAL
+    app = target.name
+    data_dir = target / f"{PASCAL[app]}Data"
+    if data_dir.is_dir():
+        shutil.copytree(data_dir, backup / data_dir.name, dirs_exist_ok=True)
+    portable = target / "portable.txt"
+    if portable.is_file():
+        shutil.copy2(portable, backup / "portable.txt")
+
+
+def restore_portable_state(target: Path, backup: Path):
+    app = target.name
+    data_dir = target / f"{PASCAL[app]}Data"
+    src_data = backup / f"{PASCAL[app]}Data"
+    if src_data.is_dir():
+        if data_dir.exists():
+            shutil.rmtree(data_dir)
+        shutil.move(str(src_data), str(data_dir))
+    src_portable = backup / "portable.txt"
+    if src_portable.is_file():
+        shutil.copy2(src_portable, target / "portable.txt")
+
+
+def install_one(app: str, root: Path, auto_yes: bool, skip_vt: bool, vt_key: str | None, update_only: bool):
+    target = root / app
+    if update_only and not is_installed(app, root):
+        print(f"[{app}] not installed, skipping (update-only)")
+        return True
+
+    print(f"\n=== {app} ===")
+    tag, assets = latest_release(app)
+    print(f"latest release: {tag}")
+    zip_name = find_zip_asset(assets, app)
+    if not zip_name:
+        print(f"[{app}] no portable zip asset found; skipping")
+        return False
+    zip_url = assets[zip_name]
+    sums_name = next((n for n in assets if n.lower().startswith("sha256sums")), None)
+
+    expected_hash = None
+    if sums_name:
+        sums_text = http_get(assets[sums_name]).decode("utf-8", "replace")
+        parsed = parse_sha256sums(sums_text)
+        expected_hash = parsed.get(zip_name)
+
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        zip_path = td / zip_name
+        print(f"downloading {zip_name} ...")
+        zip_path.write_bytes(http_get(zip_url))
+        actual_hash = sha256_file(zip_path)
+        print(f"sha256: {actual_hash}")
+        if expected_hash:
+            if actual_hash != expected_hash:
+                print(f"[{app}] CHECKSUM MISMATCH (expected {expected_hash}); aborting")
+                return False
+            print("checksum OK")
+        else:
+            print("[{app}] no SHA256SUMS entry; cannot verify checksum".format(app=app))
+
+        if not skip_vt:
+            vt_result = vt_check(actual_hash, vt_key)
+            if vt_result is None:
+                if vt_key:
+                    print(f"[{app}] VirusTotal: no report yet (hash not found).")
+                else:
+                    print(f"[{app}] VirusTotal: no API key (set VT_API_KEY). Manual scan: https://www.virustotal.com/gui/file/{actual_hash}")
+                if not confirm(f"[{app}] proceed without a clean VirusTotal verdict?", auto_yes):
+                    print(f"[{app}] aborted by user")
+                    return False
+            elif vt_result is True:
+                print(f"[{app}] VirusTotal: clean")
+            else:
+                print(f"[{app}] VirusTotal: MALICIOUS/SUSPICIOUS; aborting")
+                return False
+
+        # extract
+        extract_dir = td / "extracted"
+        extract_dir.mkdir()
+        with zipfile.ZipFile(zip_path) as z:
+            z.extractall(extract_dir)
+        # find single top-level dir
+        entries = [p for p in extract_dir.iterdir()]
+        src = entries[0] if (len(entries) == 1 and entries[0].is_dir()) else extract_dir
+
+        if not confirm(f"[{app}] install/update into {target}?", auto_yes):
+            print(f"[{app}] aborted by user")
+            return False
+
+        backup = td / "backup"
+        if target.exists():
+            backup_portable_state(target, backup)
+            # remove old target
+            shutil.rmtree(target)
+        target.mkdir(parents=True, exist_ok=True)
+        # move extracted contents
+        for item in src.iterdir():
+            dest = target / item.name
+            if item.is_dir():
+                shutil.copytree(item, dest)
+            else:
+                shutil.copy2(item, dest)
+        # restore portable state (settings) from backup
+        if backup.exists():
+            restore_portable_state(target, backup)
+
+        print(f"[{app}] installed {tag} -> {target}")
+        try:
+            create_shortcut(app, root)
+        except Exception as e:
+            print(f"[{app}] shortcut creation failed: {e}")
+        return True
+
+
+def cmd_list(root: Path):
+    for app in APPS:
+        target = root / app / f"{app}.exe"
+        if target.is_file():
+            cli = root / app / f"{app}-cli.exe"
+            try:
+                probe = cli if cli.is_file() else target
+                out = subprocess.check_output([str(probe), "--version"], text=True, stderr=subprocess.DEVNULL, timeout=10).strip().splitlines()[0]
+            except Exception:
+                out = "(version unknown)"
+            print(f"{app:10s} installed  {out}")
+        else:
+            print(f"{app:10s} not installed")
+
+
+def start_menu_dir() -> Path:
+    base = Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "AppBox"
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+def create_shortcut(app: str, root: Path):
+    exe = root / app / f"{app}.exe"
+    if not exe.is_file():
+        return False
+    lnk = start_menu_dir() / f"{PASCAL[app]}.lnk"
+    ps = (
+        "$ws = New-Object -ComObject WScript.Shell; "
+        f"$s = $ws.CreateShortcut('{str(lnk)}'); "
+        f"$s.TargetPath = '{str(exe)}'; "
+        f"$s.WorkingDirectory = '{str(root / app)}'; "
+        f"$s.IconLocation = '{str(exe)},0'; "
+        f"$s.Description = '{PASCAL[app]} portable app'; "
+        "$s.Save()"
+    )
+    subprocess.run(["powershell", "-NoProfile", "-Command", ps], check=True, capture_output=True)
+    print(f"[{app}] shortcut -> {lnk}")
+    return True
+
+
+def cmd_run(app: str, root: Path):
+    exe = root / app / f"{app}.exe"
+    if not exe.is_file():
+        print(f"{app} not installed; run install first")
+        return False
+    subprocess.Popen([str(exe)])
+    print(f"launched {exe}")
+    return True
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Install/update portable Crafting Apps")
+    parser.add_argument("command", nargs="?", default="install", choices=["install", "update", "run", "list", "shortcuts"])
+    parser.add_argument("apps", nargs="*", help="subset of apps (default: all)")
+    parser.add_argument("--root", type=Path, default=None, help="appbox root (default: script dir)")
+    parser.add_argument("--yes", "-y", action="store_true", help="skip confirmation prompts")
+    parser.add_argument("--skip-vt", action="store_true", help="skip VirusTotal check")
+    args = parser.parse_args()
+
+    root = args.root if args.root else root_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    vt_key = os.environ.get("VT_API_KEY")
+
+    if args.command == "list":
+        cmd_list(root)
+        return
+    if args.command == "shortcuts":
+        for app in (args.apps if args.apps else APPS):
+            if app in APPS:
+                create_shortcut(app, root)
+        return
+    if args.command == "run":
+        if not args.apps:
+            print("usage: run <app>")
+            sys.exit(1)
+        cmd_run(args.apps[0], root)
+        return
+
+    apps = args.apps if args.apps else APPS
+    apps = [a for a in apps if a in APPS]
+    if not apps:
+        print("no valid apps specified")
+        sys.exit(1)
+
+    update_only = (args.command == "update")
+
+    if not confirm(f"This will download and install/update {len(apps)} app(s) into {root}. Continue?", args.yes):
+        print("aborted")
+        sys.exit(0)
+
+    ok = True
+    for app in apps:
+        if not install_one(app, root, args.yes, args.skip_vt, vt_key, update_only):
+            ok = False
+    cmd_list(root)
+    sys.exit(0 if ok else 1)
+
+
+if __name__ == "__main__":
+    main()
