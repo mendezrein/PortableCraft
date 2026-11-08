@@ -216,14 +216,16 @@ def install_one(app: str, root: Path, auto_yes: bool, skip_vt: bool, vt_key: str
                 if vt_key:
                     print(f"[{app}] VirusTotal: no report yet (hash not found).")
                 else:
-                    print(f"[{app}] VirusTotal: no API key (set VT_API_KEY). Manual scan: https://www.virustotal.com/gui/file/{actual_hash}")
-                if not confirm(f"[{app}] proceed without a clean VirusTotal verdict?", auto_yes):
-                    print(f"[{app}] aborted by user")
-                    return False
+                    print(f"[{app}] VirusTotal: no API key (set VT_API_KEY).")
+                print(f"[{app}] VirusTotal: STOP - file not verified as clean. Please check manually:")
+                print(f"  https://www.virustotal.com/gui/file/{actual_hash}")
+                print(f"[{app}] aborted; verify on VirusTotal before proceeding.")
+                return False
             elif vt_result is True:
                 print(f"[{app}] VirusTotal: clean")
             else:
                 print(f"[{app}] VirusTotal: MALICIOUS/SUSPICIOUS; aborting")
+                print(f"  https://www.virustotal.com/gui/file/{actual_hash}")
                 return False
 
         # extract
@@ -508,6 +510,15 @@ def main():
             sys.exit(1)
         cmd_run(args.apps[0], root)
         return
+
+    # VirusTotal check is optional: ask at the start for install/update.
+    if not args.skip_vt:
+        if args.yes:
+            if not vt_key:
+                args.skip_vt = True
+        else:
+            if not confirm("Run optional VirusTotal scan? (requires VT_API_KEY for automatic results)", False):
+                args.skip_vt = True
 
     apps = args.apps if args.apps else APPS
     apps = [a for a in apps if a in APPS]
